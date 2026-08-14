@@ -257,6 +257,8 @@ Indexes support filtering by user, team, type, route, and time range.
 | `VANTAGE_CLIENT` | MCP | Default client id when handshake is unknown |
 | `VANTAGE_FORWARD_TIMEOUT_SEC` | MCP | HTTP POST timeout to telemetry-service (default **10**) |
 | `VANTAGE_OUTBOX_POLL_SEC` | MCP | How often the worker retries the durable outbox (default **15**) |
+| `VANTAGE_RECONCILE_INTERVAL_SEC` | MCP | How often to replay undelivered events from local log (default **300**) |
+| `VANTAGE_RECONCILE_TAIL_LINES` | MCP | Max tail lines scanned during reconcile (default **2000**) |
 | `VANTAGE_RETRY_MIN_SECONDS` | MCP | Minimum backoff between delivery retries (default **5**) |
 | `VANTAGE_CURSOR_POLL_INTERVAL_SEC` | MCP | Cursor DB poll interval |
 | `VANTAGE_CURSOR_USAGE_INTERVAL_SEC` | MCP | Debounce between `cursor_usage` POSTs per Composer request |
@@ -267,15 +269,17 @@ Indexes support filtering by user, team, type, route, and time range.
 
 ---
 
-## Reliable Cursor delivery (permanent setup)
+## Reliable Cursor delivery (zero-touch for developers)
 
-Cursor telemetry reaches the dashboard only when the **MCP server stays connected** and **HTTP delivery succeeds**. Use this checklist once; the MCP code handles retries after that.
+Cursor telemetry reaches the dashboard when the **MCP server stays connected** and **HTTP delivery succeeds**. After one-time `setup.ps1` + Cursor reload, the MCP handles everything automatically — no manual backfill, drain scripts, or process cleanup.
 
-### 1. Keep MCP connected
+### 1. One-time developer setup
 
-- Cursor → **Settings → MCP** → `vantage-telemetry` must show **Connected**
-- After changing `~/.cursor/mcp.json`, run **Developer: Reload Window**
-- Multi-root workspaces spawn one MCP per folder; only one polls the Cursor DB (lock file) — that is expected
+- Run `vantage-client/setup.ps1` once per machine
+- **Developer: Reload Window** once so Cursor starts the MCP subprocess
+- Cursor → **Settings → MCP** → `vantage-telemetry` should show **Connected**
+
+Multi-root workspaces may spawn one MCP per folder; only one instance owns delivery (file lock) — that is expected.
 
 ### 2. Recommended MCP env (`~/.cursor/mcp.json`)
 
@@ -285,52 +289,65 @@ Cursor telemetry reaches the dashboard only when the **MCP server stays connecte
   "VANTAGE_WORKSPACE_DIR": "${workspaceFolder}",
   "VANTAGE_FORWARD_TIMEOUT_SEC": "10",
   "VANTAGE_OUTBOX_POLL_SEC": "15",
-  "VANTAGE_RETRY_MIN_SECONDS": "5"
+  "VANTAGE_RETRY_MIN_SECONDS": "5",
+  "VANTAGE_RECONCILE_INTERVAL_SEC": "300",
+  "VANTAGE_RECONCILE_TAIL_LINES": "2000"
 }
 ```
 
-Re-run `vantage-client/setup-cursor.ps1` to apply these automatically.
+Re-run `vantage-client/setup.ps1` to apply these automatically.
 
-### 3. Durable delivery pipeline
+### 3. Self-healing delivery pipeline
 
 | Stage | Path / behavior |
 |-------|-----------------|
 | Local audit log | `~/.vantage/telemetry.jsonl` — always written first |
 | Durable outbox | `~/.vantage/telemetry_outbox.jsonl` — retried until ACK |
+| Delivered ledger | `~/.vantage/telemetry_delivered_ids.json` — tracks successfully POSTed `eventId`s |
+| Delivery lock | `~/.vantage/telemetry_delivery.lock` — only one MCP instance runs delivery/reconcile |
 | Delivery log | `~/.vantage/telemetry_delivery.log` — OK / FAIL / TIMEOUT lines |
 | Dead letter | `~/.vantage/telemetry_dead_letter.jsonl` — invalid events (HTTP 400), won't block the outbox |
-| Startup | MCP drains outbox immediately on boot |
-| Background | Outbox polled every 15s even when no new events |
+| Startup | Delivery owner drains outbox + reconciles local log immediately on boot |
+| Background | Outbox polled every 15s; local log reconciled every 300s |
 | Cursor events | `cursor_usage` uses **sync delivery** (immediate POST, not queue-only) |
-| Dedupe | Cross-process dedupe runs **only after successful POST** — failed posts always retry |
+| Dedupe | Cross-process dedupe runs **only after successful POST** — stale dedupe entries never block retry |
 
-### 4. One-time flush (if backlog exists)
-
-```powershell
-cd D:\root\projects\vantage-telemetry-mcp
-python forward_pending_events.py
-```
-
-### 5. Health checks
+### 4. Health checks (optional — for admins, not developers)
 
 ```powershell
 # Service up?
 Invoke-WebRequest http://localhost:50224/health -UseBasicParsing
 
-# Pending deliveries?
+# Pending deliveries? (should drain automatically)
 (Get-Content "$env:USERPROFILE\.vantage\telemetry_outbox.jsonl" -ErrorAction SilentlyContinue).Count
 
 # Recent delivery attempts?
 Get-Content "$env:USERPROFILE\.vantage\telemetry_delivery.log" -Tail 20
 ```
 
-### 6. What Cursor records vs not
+### 5. What Cursor records vs not
 
 | Recorded | Not recorded |
 |----------|--------------|
 | Composer / Tab AI code attribution (`cursor_usage`) | Manual typing without AI |
 | File/git productivity (when MCP running) | Activity while MCP disconnected |
 | Harness-routed LLM calls (`inference` via `:50223`) | Cursor built-in models not using harness |
+
+---
+
+## GitHub webhook → Delivery & PRs (automatic)
+
+PR lifecycle metrics on the **Delivery & PRs** dashboard require `pr_opened`, `pr_reviewed`, and `pr_merged` events with metric fields (`filesChanged`, `reviewState`, `commitHash`, real GitHub timestamps).
+
+**Do not rely on manual MCP logging for production PR tracking.** Configure a GitHub repository webhook:
+
+| Setting | Value |
+|---------|--------|
+| URL | `{telemetry_url}/v1/webhooks/github` |
+| Secret | `GITHUB_WEBHOOK_SECRET` on telemetry-service |
+| Events | Pull requests, Pull request reviews |
+
+See [vantage-telemetry-service/README.md](../vantage-telemetry-service/README.md#github-webhook-delivery--prs) for setup steps.
 
 ---
 
