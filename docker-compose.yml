@@ -1,0 +1,137 @@
+# Full Vantage split stack — all services start by default.
+# Original monolith on :50123 is NOT included.
+#
+#   docker compose up -d --build
+#   docker compose --profile migrate-all run --rm migrate-migration-db
+#
+# Per-project standalone deploy: see DOCKER.md
+
+name: vantage-platform
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vantage}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vantage}
+      POSTGRES_DB: ${POSTGRES_DB:-vantage}
+    volumes:
+      - vantage_split_pgdata:/var/lib/postgresql/data
+      - ../vantage-harness-db/scripts/init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vantage} -d ${POSTGRES_DB:-vantage}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: ../vantage-harness-db
+    profiles: ["migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vantage}:${POSTGRES_PASSWORD:-vantage}@db:5432/${POSTGRES_DB:-vantage}
+    restart: "no"
+
+  migrate-migration-db:
+    build:
+      context: ../vantage-harness-db
+    profiles: ["migrate-all"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vantage}:${POSTGRES_PASSWORD:-vantage}@db:5432/vantage_migration
+    restart: "no"
+
+  telemetry-service:
+    build:
+      context: ../vantage-telemetry-service
+    restart: unless-stopped
+    ports:
+      - "${VANTAGE_TELEMETRY_PORT:-50224}:50224"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vantage}:${POSTGRES_PASSWORD:-vantage}@db:5432/vantage_migration
+      VANTAGE_TELEMETRY_PORT: "50224"
+      GATEWAY_HOST: "0.0.0.0"
+      TELEMETRY_INTERNAL_KEY: ${TELEMETRY_INTERNAL_KEY:-dev-internal-key-change-me}
+      TELEMETRY_BRIDGE_JWT_SECRET: ${TELEMETRY_BRIDGE_JWT_SECRET:-dev-bridge-secret-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:50223,http://localhost:50225}
+      VANTAGE_ADMIN_USERNAME: ${VANTAGE_ADMIN_USERNAME:-admin}
+      VANTAGE_ADMIN_PASSWORD: ${VANTAGE_ADMIN_PASSWORD:-change-me}
+      VANTAGE_UI_GOOGLE_CLIENT_ID: ${VANTAGE_UI_GOOGLE_CLIENT_ID:-}
+      VANTAGE_UI_ALLOWED_EMAILS: ${VANTAGE_UI_ALLOWED_EMAILS:-}
+      VANTAGE_UI_ALLOW_EMAIL_LOGIN: ${VANTAGE_UI_ALLOW_EMAIL_LOGIN:-true}
+
+  harness-core:
+    build:
+      context: ../vantage-harness-core
+    restart: unless-stopped
+    ports:
+      - "${VANTAGE_HARNESS_PORT:-50223}:50223"
+    depends_on:
+      db:
+        condition: service_healthy
+      telemetry-service:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vantage}:${POSTGRES_PASSWORD:-vantage}@db:5432/vantage_migration
+      VANTAGE_HARNESS_PORT: "50223"
+      GATEWAY_HOST: "0.0.0.0"
+      VANTAGE_TELEMETRY_URL: http://telemetry-service:50224
+      TELEMETRY_INTERNAL_KEY: ${TELEMETRY_INTERNAL_KEY:-dev-internal-key-change-me}
+      TELEMETRY_BRIDGE_JWT_SECRET: ${TELEMETRY_BRIDGE_JWT_SECRET:-dev-bridge-secret-change-me}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      VANTAGE_API_KEY: ${VANTAGE_API_KEY:-}
+      VANTAGE_ADMIN_TOKEN: ${VANTAGE_ADMIN_TOKEN:-}
+      VANTAGE_ADMIN_USERNAME: ${VANTAGE_ADMIN_USERNAME:-admin}
+      VANTAGE_ADMIN_PASSWORD: ${VANTAGE_ADMIN_PASSWORD:-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:50225}
+      VANTAGE_UI_ALLOW_EMAIL_LOGIN: ${VANTAGE_UI_ALLOW_EMAIL_LOGIN:-true}
+    volumes:
+      - ../vantage-harness-core/config:/app/config:ro
+
+  # Optional: separate nginx UI (default embed uses telemetry-service /dashboard on :50224)
+  telemetry-ui:
+    profiles: ["standalone-ui"]
+    build:
+      context: ../vantage-telemetry-ui
+    restart: unless-stopped
+    ports:
+      - "${VANTAGE_TELEMETRY_UI_PORT:-50226}:80"
+    depends_on:
+      telemetry-service:
+        condition: service_started
+    environment:
+      VANTAGE_TELEMETRY_URL: http://localhost:${VANTAGE_TELEMETRY_PORT:-50224}
+
+  harness-ui:
+    build:
+      context: ../vantage-harness-ui
+    restart: unless-stopped
+    ports:
+      - "${VANTAGE_HARNESS_UI_PORT:-50225}:80"
+    depends_on:
+      harness-core:
+        condition: service_started
+      telemetry-service:
+        condition: service_started
+    environment:
+      VANTAGE_HARNESS_URL: http://localhost:${VANTAGE_HARNESS_PORT:-50223}
+      VANTAGE_TELEMETRY_URL: http://localhost:${VANTAGE_TELEMETRY_PORT:-50224}
+
+volumes:
+  vantage_split_pgdata:
