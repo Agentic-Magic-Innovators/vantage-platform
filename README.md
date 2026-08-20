@@ -2,6 +2,18 @@
 
 Orchestrates all post-split services on migration ports **50223–50226**. The original monolith on **50123** is untouched.
 
+## Repositories
+
+All Vantage split-stack components live under [Agentic-Magic-Innovators](https://github.com/orgs/Agentic-Magic-Innovators/repositories):
+
+| Repo | Role |
+|------|------|
+| [vantage-client](https://github.com/Agentic-Magic-Innovators/vantage-client) | Continue-config + Cursor BYOK setup (`setup.ps1`) |
+| [vantage-telemetry-mcp](https://github.com/Agentic-Magic-Innovators/vantage-telemetry-mcp) | Local telemetry MCP collector — self-contained one-command setup (`python setup.py`), no longer requires `vantage-client` |
+| [vantage-platform](https://github.com/Agentic-Magic-Innovators/vantage-platform) | Docker Compose orchestration |
+| [vantage-telemetry-service](https://github.com/Agentic-Magic-Innovators/vantage-telemetry-service) | Telemetry ingest + dashboards API |
+| [vantage-harness-core](https://github.com/Agentic-Magic-Innovators/vantage-harness-core) | OpenAI-compatible gateway |
+
 ## Quick start
 
 ```powershell
